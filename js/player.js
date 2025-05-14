@@ -16,10 +16,19 @@ export class Player {
         this.maxFallSpeed = CONFIG.PLAYER.MAX_FALL_SPEED;
         this.canJump = true;
         this.isRunning = false;
+        this.isCrouching = false;
+        this.inAir = false;
         this.health = 100;
         this.shield = 50;
+        this.currentAcceleration = CONFIG.PLAYER.INITIAL_ACCELERATION;
+        this.lastMoveDirection = new THREE.Vector3();
+        this.smoothedVelocity = new THREE.Vector3();
+        this.isTagged = false; // 被弾状態
+        this.spawnPoint = CONFIG.MAP.SPAWN_POINTS.ATTACKER;
+        this.respawn();
 
         this.setupControls();
+        this.setupCollisionSystem();
     }
 
     setupControls() {
@@ -32,9 +41,19 @@ export class Player {
             if (event.key === ' ' && this.canJump) {
                 this.jump();
             }
+            // しゃがみ制御
+            if (event.key === 'Control') {
+                this.toggleCrouch(true);
+            }
         });
 
-        document.addEventListener('keyup', event => this.keys[event.key] = false);
+        document.addEventListener('keyup', event => {
+            this.keys[event.key] = false;
+            // しゃがみ解除
+            if (event.key === 'Control') {
+                this.toggleCrouch(false);
+            }
+        });
 
         document.addEventListener('mousemove', (event) => {
             if (document.pointerLockElement === document.body) {
@@ -53,9 +72,81 @@ export class Player {
         });
     }
 
+    setupCollisionSystem() {
+        // 当たり判定用のレイキャスターを作成
+        this.collisionRays = [];
+        const segments = CONFIG.PLAYER.COLLISION_SEGMENTS;
+        
+        // 水平方向の当たり判定レイ
+        for (let i = 0; i < segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            const direction = new THREE.Vector3(
+                Math.cos(angle),
+                0,
+                Math.sin(angle)
+            );
+            this.collisionRays.push({
+                direction: direction,
+                raycaster: new THREE.Raycaster(
+                    new THREE.Vector3(),
+                    direction,
+                    0,
+                    CONFIG.PLAYER.COLLISION_RADIUS + CONFIG.PLAYER.COLLISION_MARGIN
+                )
+            });
+        }
+
+        // 上下方向の当たり判定レイ
+        this.verticalRays = {
+            up: new THREE.Raycaster(
+                new THREE.Vector3(),
+                new THREE.Vector3(0, 1, 0),
+                0,
+                CONFIG.PLAYER.HEIGHT - CONFIG.PLAYER.CROUCH_HEIGHT + 0.1
+            ),
+            down: new THREE.Raycaster(
+                new THREE.Vector3(),
+                new THREE.Vector3(0, -1, 0),
+                0,
+                CONFIG.PLAYER.HEIGHT
+            )
+        };
+    }
+
+    toggleCrouch(crouch) {
+        if (crouch && !this.isCrouching) {
+            this.isCrouching = true;
+            this.height = CONFIG.PLAYER.CROUCH_HEIGHT;
+            this.eyeHeight = CONFIG.PLAYER.CROUCH_HEIGHT - 0.1;
+            this.camera.position.y = this.eyeHeight;
+        } else if (!crouch && this.isCrouching) {
+            // 頭上の衝突チェック
+            if (!this.checkCeilingCollision()) {
+                this.isCrouching = false;
+                this.height = CONFIG.PLAYER.HEIGHT;
+                this.eyeHeight = CONFIG.PLAYER.EYE_HEIGHT;
+                this.camera.position.y = this.eyeHeight;
+            }
+        }
+    }
+
+    checkCeilingCollision() {
+        // 頭上の空間をチェック
+        const upRay = new THREE.Raycaster(
+            this.camera.position,
+            new THREE.Vector3(0, 1, 0),
+            0,
+            CONFIG.PLAYER.HEIGHT - CONFIG.PLAYER.CROUCH_HEIGHT
+        );
+        const colliders = this.getColliders();
+        const intersects = upRay.intersectObjects(colliders);
+        return intersects.length > 0;
+    }
+
     jump() {
         this.velocity.y = this.jumpForce;
         this.canJump = false;
+        this.inAir = true;
     }
 
     update() {
@@ -68,22 +159,32 @@ export class Player {
 
     getMovementDirection() {
         const direction = new THREE.Vector3();
+        let moveCount = 0;
         
         if (this.keys['w']) {
-            direction.z = -Math.cos(this.yaw);
-            direction.x = -Math.sin(this.yaw);
+            direction.z -= Math.cos(this.yaw);
+            direction.x -= Math.sin(this.yaw);
+            moveCount++;
         }
         if (this.keys['s']) {
-            direction.z = Math.cos(this.yaw);
-            direction.x = Math.sin(this.yaw);
+            direction.z += Math.cos(this.yaw);
+            direction.x += Math.sin(this.yaw);
+            moveCount++;
         }
         if (this.keys['a']) {
-            direction.x = -Math.cos(this.yaw);
-            direction.z = Math.sin(this.yaw);
+            direction.x -= Math.cos(this.yaw);
+            direction.z += Math.sin(this.yaw);
+            moveCount++;
         }
         if (this.keys['d']) {
-            direction.x = Math.cos(this.yaw);
-            direction.z = -Math.sin(this.yaw);
+            direction.x += Math.cos(this.yaw);
+            direction.z -= Math.sin(this.yaw);
+            moveCount++;
+        }
+        
+        if (moveCount > 1) {
+            // 斜め移動時は速度を調整
+            direction.multiplyScalar(CONFIG.PLAYER.DIAGONAL_SPEED_MULTIPLIER);
         }
         
         return direction.normalize();
@@ -91,76 +192,206 @@ export class Player {
 
     updateVelocity(direction) {
         this.isRunning = this.keys['Shift'];
-        const currentSpeed = this.isRunning ? this.runSpeed : this.speed;
-
-        if (direction.length() > 0) {
-            this.velocity.x += direction.x * this.acceleration;
-            this.velocity.z += direction.z * this.acceleration;
+        let currentSpeed;
+        if (this.isCrouching) {
+            currentSpeed = CONFIG.PLAYER.CROUCH_SPEED;
+        } else if (this.isRunning) {
+            currentSpeed = CONFIG.PLAYER.RUN_SPEED;
         } else {
-            this.velocity.x *= (1 - this.deceleration);
-            this.velocity.z *= (1 - this.deceleration);
+            currentSpeed = CONFIG.PLAYER.SPEED;
         }
 
-        const horizontalVelocity = new THREE.Vector2(this.velocity.x, this.velocity.z);
-        if (horizontalVelocity.length() > currentSpeed) {
-            horizontalVelocity.normalize();
-            horizontalVelocity.multiplyScalar(currentSpeed);
-            this.velocity.x = horizontalVelocity.x;
-            this.velocity.z = horizontalVelocity.y;
+        // 被弾時の減速
+        if (this.isTagged) {
+            currentSpeed *= CONFIG.PLAYER.TAGGING_MULTIPLIER;
         }
 
-        this.velocity.y = Math.max(-this.maxFallSpeed, this.velocity.y - this.gravity);
-    }
+        const hasInput = direction.length() > 0;
+        let horizontalVelocity = new THREE.Vector2(this.velocity.x, this.velocity.z);
+        
+        if (hasInput) {
+            // 移動方向が逆転したかチェック（カウンターストレイフ）
+            const dotProduct = direction.dot(this.lastMoveDirection);
+            if (dotProduct < -0.5 && !this.inAir) {
+                // 地上での逆方向入力時の急停止
+                horizontalVelocity.multiplyScalar(0.1);
+                this.currentAcceleration = CONFIG.PLAYER.INITIAL_ACCELERATION;
+            }
 
-    updatePosition() {
-        // Y軸の移動を先に適用（重力と跳躍）
-        const nextY = this.camera.position.y + this.velocity.y;
-        if (nextY < this.eyeHeight) {
-            this.camera.position.y = this.eyeHeight;
-            this.velocity.y = 0;
-            this.canJump = true;
+            // 加速度の更新
+            if (!this.inAir) {
+                this.currentAcceleration = Math.min(
+                    this.currentAcceleration + CONFIG.PLAYER.ACCELERATION_RATE,
+                    CONFIG.PLAYER.MAX_ACCELERATION
+                );
+            }
+
+            // 移動力の計算
+            let moveForce = new THREE.Vector2(direction.x, direction.z);
+            const accelerationMultiplier = this.inAir ? 
+                CONFIG.PLAYER.AIR_ACCELERATION : 
+                this.currentAcceleration;
+
+            moveForce.multiplyScalar(accelerationMultiplier);
+
+            // 速度に加算
+            horizontalVelocity.add(moveForce);
+
+            // 現在の移動方向を保存
+            this.lastMoveDirection.copy(direction);
         } else {
-            this.camera.position.y = nextY;
-        }
+            // 入力がない場合の減速
+            this.currentAcceleration = CONFIG.PLAYER.INITIAL_ACCELERATION;
+            const stoppingDeceleration = this.inAir ? 
+                CONFIG.PLAYER.DECELERATION * 0.5 : 
+                CONFIG.PLAYER.STOPPING_DECELERATION;
 
-        // 水平方向の移動を計算
-        const horizontalMove = new THREE.Vector3(
-            this.velocity.x,
-            0,
-            this.velocity.z
-        );
+            horizontalVelocity.multiplyScalar(1 - stoppingDeceleration);
 
-        if (horizontalMove.length() > 0) {
-            // まず試しに移動
-            const nextPosition = this.camera.position.clone().add(horizontalMove);
-            
-            // 衝突判定
-            if (this.checkCollision(nextPosition)) {
-                // 衝突した場合、X軸とZ軸を個別にチェック
-                const xMove = new THREE.Vector3(this.velocity.x, 0, 0);
-                const zMove = new THREE.Vector3(0, 0, this.velocity.z);
-                
-                const xNextPos = this.camera.position.clone().add(xMove);
-                if (!this.checkCollision(xNextPos)) {
-                    this.camera.position.x = xNextPos.x;
-                }
-                
-                const zNextPos = this.camera.position.clone().add(zMove);
-                if (!this.checkCollision(zNextPos)) {
-                    this.camera.position.z = zNextPos.z;
-                }
-            } else {
-                // 衝突がない場合は通常通り移動
-                this.camera.position.add(horizontalMove);
+            // 速度が閾値以下なら停止
+            if (horizontalVelocity.length() < CONFIG.PLAYER.STOPPING_THRESHOLD) {
+                horizontalVelocity.set(0, 0);
             }
         }
 
-        // 移動後に再度地面との衝突をチェック
-        if (this.camera.position.y < this.eyeHeight) {
-            this.camera.position.y = this.eyeHeight;
+        // 最大速度制限
+        if (horizontalVelocity.length() > currentSpeed) {
+            horizontalVelocity.normalize().multiplyScalar(currentSpeed);
+        }
+
+        // 直接速度を適用（スムージングを簡略化）
+        this.velocity.x = horizontalVelocity.x;
+        this.velocity.z = horizontalVelocity.y;
+
+        // 重力の適用（空中にいる時のみ）
+        if (this.inAir) {
+            this.velocity.y = Math.max(-this.maxFallSpeed, this.velocity.y - this.gravity);
+        }
+    }
+
+    updatePosition() {
+        let nextPosition = this.camera.position.clone();
+        let collision = false;
+
+        // Y軸の移動を適用（重力と跳躍）
+        nextPosition.y += this.velocity.y;
+        const minHeight = this.isCrouching ? CONFIG.PLAYER.CROUCH_HEIGHT : CONFIG.PLAYER.EYE_HEIGHT;
+        
+        // 床との衝突判定
+        const floorRaycaster = new THREE.Raycaster(
+            new THREE.Vector3(nextPosition.x, nextPosition.y + 1, nextPosition.z),
+            new THREE.Vector3(0, -1, 0),
+            0,
+            this.height * 2
+        );
+
+        const colliders = this.getColliders();
+        const intersects = floorRaycaster.intersectObjects(colliders);
+
+        if (intersects.length > 0) {
+            // 床との衝突があった場合
+            const floorHeight = intersects[0].point.y;
+            if (nextPosition.y < floorHeight + minHeight) {
+                nextPosition.y = floorHeight + minHeight;
+                this.velocity.y = 0;
+                this.canJump = true;
+                this.inAir = false;
+            }
+        } else if (nextPosition.y < minHeight) {
+            // スポーンエリアでの最小高さの保持
+            nextPosition.y = minHeight;
             this.velocity.y = 0;
             this.canJump = true;
+            this.inAir = false;
         }
+
+        // 水平方向の移動を分割して適用（X軸とZ軸を個別にチェック）
+        const xMove = new THREE.Vector3(this.velocity.x, 0, 0);
+        const zMove = new THREE.Vector3(0, 0, this.velocity.z);
+
+        // X軸の移動をチェック
+        let xNextPos = this.camera.position.clone().add(xMove);
+        xNextPos.y = nextPosition.y;
+        if (!this.checkCollisions(xNextPos)) {
+            nextPosition.x = xNextPos.x;
+        } else {
+            this.velocity.x = 0;
+            collision = true;
+        }
+
+        // Z軸の移動をチェック
+        let zNextPos = nextPosition.clone().add(zMove);
+        if (!this.checkCollisions(zNextPos)) {
+            nextPosition.z = zNextPos.z;
+        } else {
+            this.velocity.z = 0;
+            collision = true;
+        }
+
+        // 最終位置を適用
+        this.camera.position.copy(nextPosition);
+
+        return collision;
+    }
+
+    checkCollisions(position) {
+        const colliders = this.getColliders();
+        if (!colliders.length) return false;
+
+        // プレイヤーのカプセル型判定用のパラメータ
+        const radius = CONFIG.PLAYER.COLLISION_RADIUS;
+        const height = this.isCrouching ? CONFIG.PLAYER.CROUCH_HEIGHT : CONFIG.PLAYER.HEIGHT;
+        const margin = CONFIG.PLAYER.COLLISION_MARGIN;
+
+        // プレイヤーの上部と下部の位置
+        const playerBottom = position.y - height/2;
+        const playerTop = position.y + height/2;
+
+        for (const collider of colliders) {
+            const box = new THREE.Box3().setFromObject(collider);
+            
+            // XZ平面での距離チェック
+            const boxCenterX = (box.max.x + box.min.x) / 2;
+            const boxCenterZ = (box.max.z + box.min.z) / 2;
+            const dx = position.x - boxCenterX;
+            const dz = position.z - boxCenterZ;
+            const boxHalfWidth = (box.max.x - box.min.x) / 2;
+            const boxHalfDepth = (box.max.z - box.min.z) / 2;
+
+            // XZ平面での最近接点を計算
+            const closestX = Math.max(box.min.x - margin, Math.min(position.x, box.max.x + margin));
+            const closestZ = Math.max(box.min.z - margin, Math.min(position.z, box.max.z + margin));
+
+            // XZ平面での距離を計算
+            const distanceXZ = Math.sqrt(
+                Math.pow(position.x - closestX, 2) +
+                Math.pow(position.z - closestZ, 2)
+            );
+
+            // 水平方向の衝突判定
+            if (distanceXZ < radius + margin) {
+                // 垂直方向の衝突判定
+                if (playerBottom < box.max.y && playerTop > box.min.y) {
+                    // 衝突からの押し戻し
+                    if (Math.abs(dx) > Math.abs(dz)) {
+                        // X軸方向の押し戻し
+                        const pushX = dx > 0 ? 
+                            box.max.x + radius + margin - position.x :
+                            box.min.x - radius - margin - position.x;
+                        position.x += pushX;
+                    } else {
+                        // Z軸方向の押し戻し
+                        const pushZ = dz > 0 ?
+                            box.max.z + radius + margin - position.z :
+                            box.min.z - radius - margin - position.z;
+                        position.z += pushZ;
+                    }
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     checkCollision(position) {
@@ -239,5 +470,26 @@ export class Player {
     // シーンの初期化時に呼び出す
     setScene(scene) {
         this.scene = scene;
+    }
+
+    // 被弾時に呼び出すメソッド
+    applyTagging() {
+        this.isTagged = true;
+        setTimeout(() => {
+            this.isTagged = false;
+        }, 500); // 500ms後に回復
+    }
+
+    respawn() {
+        this.camera.position.set(
+            this.spawnPoint.x,
+            this.spawnPoint.y,
+            this.spawnPoint.z
+        );
+        this.velocity.set(0, 0, 0);
+        this.canJump = true;
+        this.inAir = false;
+        this.health = 100;
+        this.shield = 50;
     }
 }

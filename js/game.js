@@ -34,13 +34,17 @@ export class Game {
         this.camera.position.set(0, 1.8, 0);
 
         // レンダラーのセットアップ
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ 
+            antialias: true,
+            alpha: true
+        });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer.outputEncoding = THREE.sRGBEncoding;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 1.0;
+        this.renderer.setPixelRatio(window.devicePixelRatio);
         document.body.appendChild(this.renderer.domElement);
     }
 
@@ -79,12 +83,17 @@ export class Game {
         this.player.setScene(this.scene);
 
         // 武器システムの作成
-        this.weapons = new WeaponSystem();
+        this.weapons = new WeaponSystem(this.scene, this.camera);
+        
+        // 初期武器の設定
+        setTimeout(() => {
+            this.weapons.switchWeapon('knife');
+        }, 100);
 
         // UIの作成
         this.ui = new GameUI(this.player, this.weapons);
 
-        // ゲームの状態
+        // ラウンドの状態
         this.gameState = {
             round: 1,
             phase: 'buy',
